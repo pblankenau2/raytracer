@@ -1,4 +1,4 @@
-package odin_sublime_template
+package raytracer
 
 import "core:sort"
 import "core:fmt"
@@ -75,7 +75,7 @@ World :: struct {
 DefaultWorld := World{
 	LightPoint{make_pnt3(-10,10,-10),Color{1,1,1}},
 	{
-		make_sphere(0,material=Material{color=Color{0.8,1.0,0.6}, diffuse=0.7, specular=0.2}),
+		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200}),
 		make_sphere(1, transform=linalg.matrix4_scale([3]f64{0.5,0.5,0.5}))
 	}
 }
@@ -106,6 +106,57 @@ test_intersect_world :: proc(t: ^testing.T) {
 	testing.expect(t, xs[1].t == 4.5)
 	testing.expect(t, xs[2].t == 5.5)
 	testing.expect(t, xs[3].t == 6)
+}
+
+PreComputations :: struct {
+	t: f64,
+	object: Sphere,
+	point: [4]f64,
+	eyev: [4]f64,
+	normalv: [4]f64,
+	inside: bool
+}
+
+prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputations {
+	point := position(ray, intersection.t)
+	normalv := normal_at(intersection.object, point)
+	eyev := -ray.direction
+
+	inside := false
+	if linalg.dot(normalv, eyev) < 0 {
+		inside = true
+		normalv = -normalv
+	}
+
+	return PreComputations{
+		t=intersection.t,
+		object=intersection.object,
+		point=point,
+		eyev=eyev,
+		normalv=normalv,
+		inside=inside
+	}
+}
+
+shade_hit :: proc(world: World, comps: PreComputations) -> Color {
+	return lighting(comps.object.material, world.light, comps.point, comps.eyev, comps.normalv)
+}
+
+@(test)
+test_shade_hit :: proc(t: ^testing.T) {
+	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
+	i := Intersection{4, DefaultWorld.spheres[0]}
+	c := shade_hit(DefaultWorld, prepare_computations(i, r))
+	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(0.001))
+
+
+	w := DefaultWorld // TODO: Is this a copy? Try in debugger to find out...
+	w.light = LightPoint{make_pnt3(0, 0.25, 0), Color{1,1,1}}
+	r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
+	i = Intersection{0.5, w.spheres[1]}
+
+	c = shade_hit(w, prepare_computations(i, r))
+	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(0.001))
 }
 
 lighting :: proc(material: Material, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64) -> Color {
@@ -297,4 +348,21 @@ main :: proc() {
 	}
 
 	canvas_to_ppm(canv, "test.ppm")
+
+	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
+	i := Intersection{4, DefaultWorld.spheres[0]}
+	// fmt.println(shade_hit(DefaultWorld, prepare_computations(i, r)))
+	comps := prepare_computations(i, r)
+	c := shade_hit(DefaultWorld, comps)
+
+	fmt.println(c)
+	// testing.expect(t, shade_hit(DefaultWorld, prepare_computations(i, r)) == Color{0.38066, 0.47583, 0.2855})
+
+
+	// w := DefaultWorld // TODO: Is this a copy? Try in debugger to find out...
+	// w.light = LightPoint{make_pnt3(0, 0.25, 0), Color{1,1,1}}
+	// r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
+	// i = Intersection{0.5, w.spheres[1]}
+	// fmt.println(shade_hit(w, prepare_computations(i, r)))
+	// testing.expect(t, shade_hit(w, prepare_computations(i, r)) == Color{0.90498, 0.90498, 0.90498})
 }
