@@ -5,7 +5,10 @@
 			"path": ".",
 		},
 		{
-			"path": "C:\\Odin\\core"
+			"path": "C:\\Odin\\core",
+		},
+		{
+			"path": "C:\\Odin\\vendor"
 		},
 	],
 	"build_systems":
@@ -22,7 +25,7 @@
 		},
 		{
 			"name": "debug_build",
-			"cmd": "odin build . -debug",
+			"cmd": "odin build . -debug -o:none",
 			"file_regex": "^(.+)\\(([0-9]+):([0-9]+)\\) (.+)$",
 		}
 	],

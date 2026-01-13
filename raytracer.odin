@@ -8,6 +8,17 @@ import "core:math"
 import "core:strings"
 import "core:slice"
 import "core:testing"
+import "vendor:stb/image"
+
+ColorU8 :: [4]u8
+
+canvas_to_bmp :: proc(canv: Canvas) -> []ColorU8 {
+	pixels : [dynamic]ColorU8
+	for p in canv.pixels {
+		append(&pixels, ColorU8{u8(p.r*255), u8(p.g*255), u8(p.b*255), 255})
+	}
+	return pixels[:]
+}
 
 make_vec3 :: proc(x:f64,y:f64,z:f64) -> [4]f64 {
 	return [4]f64{x,y,z,0}
@@ -142,6 +153,16 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	return lighting(comps.object.material, world.light, comps.point, comps.eyev, comps.normalv)
 }
 
+color_at :: proc(w: World, r: Ray) -> Color {
+	intersections := intersect_world(w, r)
+	hit_intersection, ok := hit(intersections)
+	if ok != true {
+		return Color{0,0,0}
+	}
+	comps := prepare_computations(hit_intersection, r)
+	return shade_hit(w, comps)
+}
+
 @(test)
 test_shade_hit :: proc(t: ^testing.T) {
 	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
@@ -207,6 +228,10 @@ intersect :: proc(ray: Ray, object: Sphere) -> (Intersection, Intersection, bool
 // TODO: is this function needed?  Can we combine with intersection?
 hit :: proc(intersections: []Intersection) -> (Intersection, bool) {
 	
+	if len(intersections) == 0 {
+		return Intersection{}, false
+	}
+
 	smallest := intersections[0]
 	for i in intersections {
 		// Remove negative t intersections
@@ -295,15 +320,6 @@ reflect :: proc(in_: [4]f64, normal: [4]f64) -> [4]f64 {
 
 main :: proc() {
 	origin := make_pnt3(0,0,-5)
-	s := make_sphere(0)
-	// s.transform = linalg.matrix4_scale([3]f64{1,0.5,1}) // TODO: No need for set_transform function.
-	s.material.color = Color{1, 0.2, 1}
-	s.material.shininess = 100
-
-	light_position := make_pnt3(-10, 10, -10)
-	light_color := Color{1, 1, 1}
-	light := LightPoint{light_position, light_color} 
-
 
 	// Cast one ray per pixel?
 	canv_rows := 500
@@ -324,45 +340,18 @@ main :: proc() {
 
 			pos := make_vec3(world_x,world_y,canv_z)
 			ray := Ray{origin, linalg.normalize(pos - origin)}
-			
-			i1, i2, okay := intersect(ray, s)
-			hit : Intersection
-			if (i1.t < i2.t) & (i1.t > 0) {
-				hit = i1
-			} else if (i2.t < i1.t) & (i2.t > 0) {
-				hit = i2
-			} else {
-				okay = false
-			}
 
-			if okay {
-				point := position(ray, hit.t)
-				normal := normal_at(hit.object, point)
-				eye := -ray.direction
-				color := lighting(hit.object.material, light, point, eye, normal)
-				set_color(&canv, row, col, color)
-			} else {
-				set_color(&canv, row, col, Color{0.0, 0.0, 0.0})
-			}
+			// NOTE: to set a conditional breakpoint in raddbg, you need to set a second breakpoint below the conditional breakpoint.
+			// The conditional breakpoint isn't triggered, the second breakpoint is triggered, then on the next loop the conditional
+			// breakpoint gets triggered.  I don't know why this is the case.  It's like the conditional breakpoint only signals
+			// a condition for the next breakpoint to be triggered.  Maybe that's the intended design?
+
+			color := color_at(DefaultWorld, ray)
+			set_color(&canv, row, col, color)
 		}
 	}
 
-	canvas_to_ppm(canv, "test.ppm")
+	// canvas_to_ppm(canv, "test.ppm")
+	ok := image.write_png("output.png", w=i32(canv_cols), h=i32(canv_rows), comp=4, data=raw_data(canvas_to_bmp(canv)), stride_in_bytes=i32(canv_cols) * 4)
 
-	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
-	i := Intersection{4, DefaultWorld.spheres[0]}
-	// fmt.println(shade_hit(DefaultWorld, prepare_computations(i, r)))
-	comps := prepare_computations(i, r)
-	c := shade_hit(DefaultWorld, comps)
-
-	fmt.println(c)
-	// testing.expect(t, shade_hit(DefaultWorld, prepare_computations(i, r)) == Color{0.38066, 0.47583, 0.2855})
-
-
-	// w := DefaultWorld // TODO: Is this a copy? Try in debugger to find out...
-	// w.light = LightPoint{make_pnt3(0, 0.25, 0), Color{1,1,1}}
-	// r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
-	// i = Intersection{0.5, w.spheres[1]}
-	// fmt.println(shade_hit(w, prepare_computations(i, r)))
-	// testing.expect(t, shade_hit(w, prepare_computations(i, r)) == Color{0.90498, 0.90498, 0.90498})
 }
