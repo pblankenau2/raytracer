@@ -10,6 +10,8 @@ import "core:slice"
 import "core:testing"
 import "vendor:stb/image"
 
+EPSILON :: 0.0001
+
 ColorU8 :: [4]u8
 
 canvas_to_bmp :: proc(canv: Canvas) -> []ColorU8 {
@@ -32,8 +34,8 @@ make_pnt3 :: proc(x:f64,y:f64,z:f64) -> [4]f64 {
 Color :: [3]f64
 
 Canvas :: struct {
-	width: int,
-	height: int,
+	width: i32,
+	height: i32,
 	pixels: [dynamic]Color
 }
 
@@ -55,6 +57,95 @@ make_sphere :: proc(
 ) -> Sphere {
 	return Sphere{obj_id=obj_id, transform=transform, material=material}
 }
+
+// NOTE: the canvas is always 1 world unit from the camera.
+Camera :: struct {
+	hsize: i32,
+	vsize: i32,
+	field_of_view: f64, //= (math.PI / 2.0)
+	transform: matrix[4,4]f64,
+	pixel_size: f64,
+	half_width: f64,
+	half_height: f64
+}
+
+make_camera :: proc(
+	hsize: i32 = 200,
+	vsize: i32 = 200,
+	field_of_view: f64 = (math.PI / 2.0),
+	transform: matrix[4,4]f64 = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}
+) -> Camera { // TODO: would you ever want to make only have the Camera struct defined within a proc?
+	half_view := math.tan(field_of_view / 2)
+	aspect := f64(hsize) / f64(vsize)
+
+	half_width : f64
+	half_height : f64
+	if aspect >= 1 {
+		half_width = half_view
+		half_height = half_view / aspect
+	} else {
+		half_width = half_view * aspect
+		half_height = half_view
+	}
+	pixel_size := (half_width * 2) / f64(hsize)
+
+	return Camera{
+		hsize,
+		vsize,
+		field_of_view,
+		transform,
+		pixel_size,
+		half_width,
+		half_height
+	}
+}
+
+ray_for_pixel :: proc(camera: Camera, px: i32, py: i32) -> Ray {
+	// the offset from the edge of the canvas to the pixel's center
+	xoffset := (f64(px) + 0.5) * camera.pixel_size
+	yoffset := (f64(py) + 0.5) * camera.pixel_size
+
+	// The untransformed coordinates of the pixel in world space.
+	// Remember that the camera looks toward -z, so +x is to the left.
+	world_x := camera.half_width - xoffset
+	world_y := camera.half_height - yoffset
+
+	// using the camera matrix, transform the canvas point and the origin,
+	// and then compute the ray's direction vector. (remember that the canvas is at z=-1)
+	pixel := linalg.inverse(camera.transform) * make_pnt3(world_x, world_y, -1)
+	origin := linalg.inverse(camera.transform) * make_pnt3(0,0,0)
+	direction := linalg.normalize(pixel - origin)
+	return Ray{origin, direction}
+}
+
+render :: proc(camera: Camera, world: World) -> Canvas {
+	canv := Canvas{
+		width=camera.hsize,
+		height=camera.vsize,
+		pixels=make([dynamic]Color, camera.hsize*camera.vsize) // TODO: preallocated dynamic array?  Odin book says use slices.
+	}
+
+	for x in 0..<canv.width{
+		for y in 0..<canv.height {
+			ray := ray_for_pixel(camera, x, y)
+			color := color_at(world, ray)
+			set_color(&canv, y, x, color)
+		}
+	}
+	return canv
+}
+
+// function render(camera, world)
+// image ← canvas(camera.hsize, camera.vsize)
+// for y ← 0 to camera.vsize - 1
+// for x ← 0 to camera.hsize - 1
+// ray ← ray_for_pixel(camera, x, y)
+// color ← color_at(world, ray)
+// write_pixel(image, x, y, color)
+// end for
+// end for
+// return image
+// end function
 
 Intersection :: struct {
 	t: f64,
@@ -150,13 +241,16 @@ prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputa
 }
 
 shade_hit :: proc(world: World, comps: PreComputations) -> Color {
-	return lighting(comps.object.material, world.light, comps.point, comps.eyev, comps.normalv)
+	// TODO: put the over point in comps?  comps.over_point ← comps.point + comps.normalv * EPSILON
+
+	shadowed := is_shadowed(world, comps.point + comps.normalv * EPSILON)
+	return lighting(comps.object.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
 }
 
 color_at :: proc(w: World, r: Ray) -> Color {
 	intersections := intersect_world(w, r)
 	hit_intersection, ok := hit(intersections)
-	if ok != true {
+	if !ok {
 		return Color{0,0,0}
 	}
 	comps := prepare_computations(hit_intersection, r)
@@ -168,7 +262,7 @@ test_shade_hit :: proc(t: ^testing.T) {
 	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
 	i := Intersection{4, DefaultWorld.spheres[0]}
 	c := shade_hit(DefaultWorld, prepare_computations(i, r))
-	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(0.001))
+	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(EPSILON))
 
 
 	w := DefaultWorld // TODO: Is this a copy? Try in debugger to find out...
@@ -177,13 +271,32 @@ test_shade_hit :: proc(t: ^testing.T) {
 	i = Intersection{0.5, w.spheres[1]}
 
 	c = shade_hit(w, prepare_computations(i, r))
-	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(0.001))
+	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(EPSILON))
 }
 
-lighting :: proc(material: Material, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64) -> Color {
+is_shadowed :: proc(world: World, point: [4]f64) -> bool {
+	v := world.light.position - point
+	distance := linalg.length(v.xyz)
+	direction := linalg.normalize(v)
+	r := Ray{point, direction}
+	intersections := intersect_world(world, r)
+	h, ok := hit(intersections)
+
+	if ok && (h.t < distance) {
+		return true
+	} else {
+		return false
+	}
+}
+
+lighting :: proc(material: Material, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64, in_shadow: bool) -> Color {
 	effective_color := material.color * light.intensity
 	lightv := linalg.normalize(light.position - point)
 	ambient := effective_color * material.ambient
+	if in_shadow {
+		return ambient
+	}
+
 	light_dot_normal := linalg.dot(lightv, normalv)
 
 	diffuse := Color{0,0,0}
@@ -227,38 +340,35 @@ intersect :: proc(ray: Ray, object: Sphere) -> (Intersection, Intersection, bool
 
 // TODO: is this function needed?  Can we combine with intersection?
 hit :: proc(intersections: []Intersection) -> (Intersection, bool) {
-	
-	if len(intersections) == 0 {
-		return Intersection{}, false
-	}
 
-	smallest := intersections[0]
+	closest_t := f64(max(f64)) 
+	found := false
+	hit_record := Intersection{}
 	for i in intersections {
-		// Remove negative t intersections
-		if (i.t < 0) {continue}
-
-		// Hit is smallest non negative intersection
-		if (i.t < smallest.t) {smallest = i}
-	}
-	if (smallest.t < 0) {
-		return smallest, false
-	}
-	return smallest, true
+		// We only care about intersections that happen in front of the ray (t > 0)
+		// and are closer than anything we've found so far.
+		if i.t > 0 && i.t < closest_t {
+			closest_t = i.t
+			hit_record = i
+			found = true
+		}
+	}	
+	return hit_record, found
 }
 
 position :: proc(ray: Ray, t: f64) -> [4]f64 {
 	return ray.origin + ray.direction * t
 }
 
-set_color :: proc(canvas: ^Canvas, row: int, col: int, color: Color) {
+set_color :: proc(canvas: ^Canvas, row: i32, col: i32, color: Color) {
 	clipped_color := Color{min(color.r, 1), min(color.g, 1), min(color.b, 1)}
-	if (row < canvas.height) & (col < canvas.width) & (row >= 0) & (col >= 0) {
+	if (row < canvas.height) && (col < canvas.width) && (row >= 0) && (col >= 0) {
 		canvas.pixels[canvas.width*row + col] = clipped_color
 	}
 
 }
 
-make_canvas :: proc(width: int, height: int) -> Canvas {
+make_canvas :: proc(width: i32, height: i32) -> Canvas {
 	pix: [dynamic]Color
 
 	for i in 0..<(width*height) {
@@ -318,40 +428,67 @@ reflect :: proc(in_: [4]f64, normal: [4]f64) -> [4]f64 {
 	return in_ - normal * 2 * linalg.dot(in_, normal)
 }
 
-main :: proc() {
-	origin := make_pnt3(0,0,-5)
-
-	// Cast one ray per pixel?
-	canv_rows := 500
-	canv_cols := 500
-	canv_world_size := 5.0
-	canv_z := 5.0
-	pixel_size := canv_world_size / f64(canv_rows)
-	top_y := canv_world_size / 2
-	left_x := -canv_world_size / 2
-	canv := make_canvas(canv_cols, canv_rows)
-
-	for row in 0..<canv_rows {
-		world_y := top_y - f64(row)*pixel_size
-		for col in 0..<canv_cols {
-			// Canvas passes through sphere origin, pixels 100 pixels is 1 unit world space
-			// So the top left pixel in world space is -25, -25, 0? the next pixel to the right is -25, -24.9, 0
-			world_x := left_x + f64(col)*pixel_size
-
-			pos := make_vec3(world_x,world_y,canv_z)
-			ray := Ray{origin, linalg.normalize(pos - origin)}
-
-			// NOTE: to set a conditional breakpoint in raddbg, you need to set a second breakpoint below the conditional breakpoint.
-			// The conditional breakpoint isn't triggered, the second breakpoint is triggered, then on the next loop the conditional
-			// breakpoint gets triggered.  I don't know why this is the case.  It's like the conditional breakpoint only signals
-			// a condition for the next breakpoint to be triggered.  Maybe that's the intended design?
-
-			color := color_at(DefaultWorld, ray)
-			set_color(&canv, row, col, color)
-		}
+view_transform :: proc(from: [4]f64, to: [4]f64, up: [4]f64) -> matrix[4,4]f64 {
+	// from, to : Pnt3, up : Vec3
+	forward := linalg.normalize((to.xyz - from.xyz))
+	upn := linalg.normalize(up.xyz)
+	left := linalg.cross(forward, upn)
+	true_up := linalg.cross(left, forward)
+	orientation := matrix[4,4]f64 {
+		left.x, left.y, left.z, 0,
+		true_up.x, true_up.y, true_up.z, 0,
+		-forward.x, -forward.y, -forward.z, 0,
+		0, 0, 0, 1
 	}
+	return orientation * linalg.matrix4_translate([3]f64{-from.x, -from.y, -from.z})
+}
+
+main :: proc() {
+
+	floor := make_sphere(0)
+	floor.transform = linalg.matrix4_scale([3]f64{10, 0.01, 10})
+	floor.material = DefaultMaterial
+	floor.material.color = Color{1, 0.9, 0.9}
+	floor.material.specular = 0
+
+	left_wall := make_sphere(1)
+	left_wall.transform = linalg.matrix4_translate([3]f64{0,0,5}) * linalg.matrix4_rotate(-math.PI/4, [3]f64{0,1,0}) * linalg.matrix4_rotate(math.PI/2, [3]f64{1,0,0}) * linalg.matrix4_scale([3]f64{10, 0.01, 10})
+
+	right_wall := make_sphere(2)
+	right_wall.transform = linalg.matrix4_translate([3]f64{0,0,5}) * linalg.matrix4_rotate(math.PI/4, [3]f64{0,1,0}) * linalg.matrix4_rotate(math.PI/2, [3]f64{1,0,0}) * linalg.matrix4_scale([3]f64{10, 0.01, 10})
+	right_wall.material = floor.material
+
+	middle := make_sphere(3)
+	middle.transform = linalg.matrix4_translate([3]f64{-0.5,1,0.5})
+	middle.material = DefaultMaterial
+	middle.material.color = Color{0.1, 1, 0.5}
+	middle.material.diffuse = 0.7
+	middle.material.specular = 0.3
+
+	right := make_sphere(4)
+	right.transform = linalg.matrix4_translate([3]f64{1.5, 0.5, -0.5}) * linalg.matrix4_scale([3]f64{0.5,0.5,0.5})
+	right.material = DefaultMaterial
+	right.material.color = Color{0.5,1,0.1}
+	right.material.diffuse = 0.7
+	right.material.specular = 0.3
+
+	left := make_sphere(5)
+	left.transform = linalg.matrix4_translate([3]f64{-1.5, 0.33, -0.75}) * linalg.matrix4_scale([3]f64{0.33,0.33,0.33})
+	left.material = DefaultMaterial
+	left.material.color = Color{1,0.8,0.1}
+	left.material.diffuse = 0.7
+	left.material.specular = 0.3
+
+
+	world := World{}
+	spheres := [6]Sphere{floor, left_wall, right_wall, middle, right, left}
+	world.spheres = spheres[:]
+	world.light = LightPoint{make_pnt3(-10, 10, -10), Color{1, 1, 1}}
+	camera := make_camera(1000, 500, math.PI/3)
+	camera.transform = view_transform(make_pnt3(0, 1.5, -5), make_pnt3(0,1,0), make_vec3(0,1,0))
+	canv := render(camera, world)
 
 	// canvas_to_ppm(canv, "test.ppm")
-	ok := image.write_png("output.png", w=i32(canv_cols), h=i32(canv_rows), comp=4, data=raw_data(canvas_to_bmp(canv)), stride_in_bytes=i32(canv_cols) * 4)
+	ok := image.write_png("output.png", w=i32(camera.hsize), h=i32(camera.vsize), comp=4, data=raw_data(canvas_to_bmp(canv)), stride_in_bytes=i32(camera.hsize) * 4)
 
 }
