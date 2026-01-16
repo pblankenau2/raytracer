@@ -8,18 +8,19 @@ import "core:math"
 import "core:strings"
 import "core:slice"
 import "core:testing"
+import "core:mem/virtual"
 import "vendor:stb/image"
 
 EPSILON :: 0.0001
 
 ColorU8 :: [4]u8
 
-canvas_to_bmp :: proc(canv: Canvas) -> []ColorU8 {
-	pixels : [dynamic]ColorU8
-	for p in canv.pixels {
+canvas_to_bmp :: proc(canv: Canvas) -> [dynamic]ColorU8 {
+	pixels := make([dynamic]ColorU8, 0, len(canv.pixels))
+	for p, i in canv.pixels {
 		append(&pixels, ColorU8{u8(p.r*255), u8(p.g*255), u8(p.b*255), 255})
 	}
-	return pixels[:]
+	return pixels
 }
 
 make_vec3 :: proc(x:f64,y:f64,z:f64) -> [4]f64 {
@@ -36,7 +37,7 @@ Color :: [3]f64
 Canvas :: struct {
 	width: i32,
 	height: i32,
-	pixels: [dynamic]Color
+	pixels: []Color
 }
 
 Ray :: struct {
@@ -44,17 +45,21 @@ Ray :: struct {
 	direction: [4]f64 // Vec
 }
 
+// TODO: consider a SOA instead.
 Sphere :: struct {
 	obj_id: i32,
 	transform: matrix[4,4]f64,
 	material: Material
 }
 
+// TODO: consider pre-computing the inverse transform and transpose - need to make sure spheres are only created with this function then.
 make_sphere :: proc(
 	obj_id: i32,
 	transform: matrix[4,4]f64 = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1},
 	material : Material = DefaultMaterial
 ) -> Sphere {
+	// TODO: inv := linalg.inverse(transform)
+    // TODO: inv_tr := linalg.transpose(inv)
 	return Sphere{obj_id=obj_id, transform=transform, material=material}
 }
 
@@ -122,34 +127,35 @@ render :: proc(camera: Camera, world: World) -> Canvas {
 	canv := Canvas{
 		width=camera.hsize,
 		height=camera.vsize,
-		pixels=make([dynamic]Color, camera.hsize*camera.vsize) // TODO: preallocated dynamic array?  Odin book says use slices.
+		pixels=make([]Color, camera.hsize*camera.vsize)
 	}
 
-	for x in 0..<canv.width{
-		for y in 0..<canv.height {
-			ray := ray_for_pixel(camera, x, y)
-			color := color_at(world, ray)
-			set_color(&canv, y, x, color)
+	arena: virtual.Arena
+	if err := virtual.arena_init_growing(&arena); err != nil {
+		fmt.println("Failed to init arena:", err)
+		return canv
+	}
+	defer virtual.arena_destroy(&arena)
+	arena_allocator := virtual.arena_allocator(&arena)
+	{
+		context.allocator = arena_allocator // Set the context allocator for this scope.
+		for x in 0..<canv.width{
+			for y in 0..<canv.height {
+				virtual.arena_free_all(&arena) // Free memory for next pixel
+				
+				ray := ray_for_pixel(camera, x, y)
+				color := color_at(world, ray)
+				set_color(canv, y, x, color)
+			}
 		}
 	}
 	return canv
 }
 
-// function render(camera, world)
-// image ← canvas(camera.hsize, camera.vsize)
-// for y ← 0 to camera.vsize - 1
-// for x ← 0 to camera.hsize - 1
-// ray ← ray_for_pixel(camera, x, y)
-// color ← color_at(world, ray)
-// write_pixel(image, x, y, color)
-// end for
-// end for
-// return image
-// end function
 
 Intersection :: struct {
 	t: f64,
-	object: Sphere, // TODO: make it a generic Object type.
+	object: Sphere, // TODO: make it a generic Object type.  Should this be a pointer or handle instead?
 }
 
 LightPoint :: struct {
@@ -168,7 +174,8 @@ Material :: struct {
 DefaultMaterial :: Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0}
 
 World :: struct {
-	// We might want to have struct of arrays here.  Array of spheres, arrays other objects
+	// TODO. We might want to have struct of arrays here.  Array of spheres, arrays other objects.  Maybe objects should be a tagged union?
+	// Also need a count or length field so we can iterate over the arrays that have the same length.
 	light: LightPoint,
 	spheres: []Sphere
 }
@@ -182,8 +189,9 @@ DefaultWorld := World{
 	}
 }
 
-intersect_world :: proc(world: World, ray: Ray) -> []Intersection {
-	intersections : [dynamic]Intersection // heap allocated
+intersect_world :: proc(world: World, ray: Ray) -> [dynamic]Intersection {
+	intersections := make([dynamic]Intersection, 0, 32) // TODO: Preallocate 2*number of objects.
+
 	for s, i in world.spheres {
 		i1, i2, okay := intersect(ray, s)
 		if okay {
@@ -194,7 +202,7 @@ intersect_world :: proc(world: World, ray: Ray) -> []Intersection {
         return i.t < j.t
     })
 
-	return intersections[:] // need the [:] to make it a slice?
+    return intersections
 }
 
 @(test)
@@ -249,7 +257,7 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 
 color_at :: proc(w: World, r: Ray) -> Color {
 	intersections := intersect_world(w, r)
-	hit_intersection, ok := hit(intersections)
+	hit_intersection, ok := hit(intersections[:])
 	if !ok {
 		return Color{0,0,0}
 	}
@@ -265,7 +273,7 @@ test_shade_hit :: proc(t: ^testing.T) {
 	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(EPSILON))
 
 
-	w := DefaultWorld // TODO: Is this a copy? Try in debugger to find out...
+	w := DefaultWorld
 	w.light = LightPoint{make_pnt3(0, 0.25, 0), Color{1,1,1}}
 	r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
 	i = Intersection{0.5, w.spheres[1]}
@@ -279,8 +287,8 @@ is_shadowed :: proc(world: World, point: [4]f64) -> bool {
 	distance := linalg.length(v.xyz)
 	direction := linalg.normalize(v)
 	r := Ray{point, direction}
-	intersections := intersect_world(world, r)
-	h, ok := hit(intersections)
+	intersections_shadowed := intersect_world(world, r)
+	h, ok := hit(intersections_shadowed[:])
 
 	if ok && (h.t < distance) {
 		return true
@@ -340,7 +348,6 @@ intersect :: proc(ray: Ray, object: Sphere) -> (Intersection, Intersection, bool
 
 // TODO: is this function needed?  Can we combine with intersection?
 hit :: proc(intersections: []Intersection) -> (Intersection, bool) {
-
 	closest_t := f64(max(f64)) 
 	found := false
 	hit_record := Intersection{}
@@ -360,21 +367,23 @@ position :: proc(ray: Ray, t: f64) -> [4]f64 {
 	return ray.origin + ray.direction * t
 }
 
-set_color :: proc(canvas: ^Canvas, row: i32, col: i32, color: Color) {
+set_color :: proc(canvas: Canvas, row: i32, col: i32, color: Color) {
 	clipped_color := Color{min(color.r, 1), min(color.g, 1), min(color.b, 1)}
 	if (row < canvas.height) && (col < canvas.width) && (row >= 0) && (col >= 0) {
-		canvas.pixels[canvas.width*row + col] = clipped_color
+		// canvas is an immutable reference, so you can't overwrite the pixels slice, but you can right to the 
+		// the heap allocated data the slice points to.
+		canvas.pixels[canvas.width*row + col] = clipped_color 
 	}
 
 }
 
 make_canvas :: proc(width: i32, height: i32) -> Canvas {
-	pix: [dynamic]Color
+	pix := make([]Color, width*height)
 
 	for i in 0..<(width*height) {
-		append(&pix, Color{0,0,0})
+		pix[i] = Color{0,0,0}
 	}
-	// return Canvas{width, height, pix}
+
 	return Canvas{width, height, pix}
 }
 
