@@ -53,6 +53,17 @@ Sphere :: struct {
 }
 
 // TODO: consider pre-computing the inverse transform and transpose - need to make sure spheres are only created with this function then.
+Plane :: struct {
+	obj_id: i32,
+	transform: matrix[4,4]f64,
+	material: Material
+}
+
+Object :: union {
+	Sphere,
+	Plane,
+}
+
 make_sphere :: proc(
 	obj_id: i32,
 	transform: matrix[4,4]f64 = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1},
@@ -155,7 +166,7 @@ render :: proc(camera: Camera, world: World) -> Canvas {
 
 Intersection :: struct {
 	t: f64,
-	object: Sphere, // TODO: make it a generic Object type.  Should this be a pointer or handle instead?
+	object: Object, // TODO: make it a generic Object type.
 }
 
 LightPoint :: struct {
@@ -177,7 +188,7 @@ World :: struct {
 	// TODO. We might want to have struct of arrays here.  Array of spheres, arrays other objects.  Maybe objects should be a tagged union?
 	// Also need a count or length field so we can iterate over the arrays that have the same length.
 	light: LightPoint,
-	spheres: []Sphere
+	objects: []Object
 }
 
 
@@ -189,10 +200,10 @@ DefaultWorld := World{
 	}
 }
 
+
 intersect_world :: proc(world: World, ray: Ray) -> [dynamic]Intersection {
 	intersections := make([dynamic]Intersection, 0, 32) // TODO: Preallocate 2*number of objects.
-
-	for s, i in world.spheres {
+	for s, i in world.objects {
 		i1, i2, okay := intersect(ray, s)
 		if okay {
 			append(&intersections, i1, i2)
@@ -220,7 +231,7 @@ test_intersect_world :: proc(t: ^testing.T) {
 
 PreComputations :: struct {
 	t: f64,
-	object: Sphere,
+	object: Object,
 	point: [4]f64,
 	eyev: [4]f64,
 	normalv: [4]f64,
@@ -252,7 +263,13 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	// TODO: put the over point in comps?  comps.over_point ← comps.point + comps.normalv * EPSILON
 
 	shadowed := is_shadowed(world, comps.point + comps.normalv * EPSILON)
-	return lighting(comps.object.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+	switch o in comps.object {
+	case Sphere:
+		return lighting(o.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+	case Plane:
+		return lighting(o.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+	}
+	return {}
 }
 
 color_at :: proc(w: World, r: Ray) -> Color {
@@ -268,7 +285,7 @@ color_at :: proc(w: World, r: Ray) -> Color {
 @(test)
 test_shade_hit :: proc(t: ^testing.T) {
 	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
-	i := Intersection{4, DefaultWorld.spheres[0]}
+	i := Intersection{4, DefaultWorld.objects[0]}
 	c := shade_hit(DefaultWorld, prepare_computations(i, r))
 	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(EPSILON))
 
@@ -276,7 +293,7 @@ test_shade_hit :: proc(t: ^testing.T) {
 	w := DefaultWorld
 	w.light = LightPoint{make_pnt3(0, 0.25, 0), Color{1,1,1}}
 	r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
-	i = Intersection{0.5, w.spheres[1]}
+	i = Intersection{0.5, w.objects[1]}
 
 	c = shade_hit(w, prepare_computations(i, r))
 	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(EPSILON))
@@ -327,23 +344,28 @@ lighting :: proc(material: Material, light: LightPoint, point: [4]f64, eyev: [4]
 
 
 // TODO: return [2]f64 slice?
-intersect :: proc(ray: Ray, object: Sphere) -> (Intersection, Intersection, bool) { 
+intersect :: proc(ray: Ray, object: Object) -> (Intersection, Intersection, bool) {
+	switch o in object {
+	case Sphere:
+		// Need to transform the ray before calculating the intersection.
+		new_ray := transform(ray, linalg.inverse(o.transform))
+		sphere_to_ray := new_ray.origin - make_pnt3(0.0,0.0,0.0)
+		a := linalg.dot(new_ray.direction, new_ray.direction)
+		b := 2 * linalg.dot(new_ray.direction, sphere_to_ray)
+		c := linalg.dot(sphere_to_ray, sphere_to_ray) - 1
 
-	// Need to transform the ray before calculating the intersection.
-	new_ray := transform(ray, linalg.inverse(object.transform))
-	sphere_to_ray := new_ray.origin - make_pnt3(0.0,0.0,0.0)
-	a := linalg.dot(new_ray.direction, new_ray.direction)
-	b := 2 * linalg.dot(new_ray.direction, sphere_to_ray)
-	c := linalg.dot(sphere_to_ray, sphere_to_ray) - 1
+		discriminant := math.pow(b,2) - 4*a*c
+		if (discriminant < 0.0) {return Intersection{0.0, o}, Intersection{0.0, o}, false} // TODO: return nil bad?
 
-	discriminant := math.pow(b,2) - 4*a*c
-	if (discriminant < 0.0) {return Intersection{0.0, object}, Intersection{0.0, object}, false} // TODO: return nil bad?
+		t1 := (-b - math.sqrt(discriminant)) / (2 * a)
+		t2 := (-b + math.sqrt(discriminant)) / (2 * a)
 
-	t1 := (-b - math.sqrt(discriminant)) / (2 * a)
-	t2 := (-b + math.sqrt(discriminant)) / (2 * a)
-
-	// if ray is tangent to sphere then return the same intersection twice
-	return Intersection{t1, object}, Intersection{t2, object}, true
+		// if ray is tangent to sphere then return the same intersection twice
+		return Intersection{t1, o}, Intersection{t2, o}, true
+	case Plane:
+		return Intersection{0.0, o}, Intersection{0.0, o}, false
+	}
+	return {}, {}, false
 }
 
 // TODO: is this function needed?  Can we combine with intersection?
@@ -425,12 +447,23 @@ transform :: proc(r: Ray, m: matrix[4,4]f64) -> Ray {
 	return Ray{m * r.origin, m * r.direction}
 }
 
-normal_at :: proc(s: Sphere, p: [4]f64) -> [4]f64 {
-	object_point := linalg.inverse(s.transform) * p
-	object_normal := object_point - [4]f64{0.0,0.0,0.0,0.0}
-	world_normal := linalg.transpose(linalg.inverse(s.transform)) * object_normal
-	world_normal.w = 0.0
-	return linalg.normalize(world_normal)
+normal_at :: proc(obj: Object, p: [4]f64) -> [4]f64 {
+
+	switch o in obj {
+	case Sphere:
+		object_point := linalg.inverse(o.transform) * p
+		object_normal := object_point - [4]f64{0.0,0.0,0.0,0.0}
+		world_normal := linalg.transpose(linalg.inverse(o.transform)) * object_normal
+		world_normal.w = 0.0
+		return linalg.normalize(world_normal)
+	case Plane:
+		object_point := linalg.inverse(o.transform) * p
+		object_normal := object_point - [4]f64{0.0,0.0,0.0,0.0}
+		world_normal := linalg.transpose(linalg.inverse(o.transform)) * object_normal
+		world_normal.w = 0.0
+		return linalg.normalize(world_normal)
+	}
+	return {} // Weird that we need to do this since every case returns.
 }
 
 reflect :: proc(in_: [4]f64, normal: [4]f64) -> [4]f64 {
@@ -477,21 +510,22 @@ main :: proc() {
 	right := make_sphere(4)
 	right.transform = linalg.matrix4_translate([3]f64{1.5, 0.5, -0.5}) * linalg.matrix4_scale([3]f64{0.5,0.5,0.5})
 	right.material = DefaultMaterial
-	right.material.color = Color{0.5,1,0.1}
+	right.material.color = Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764}
 	right.material.diffuse = 0.7
 	right.material.specular = 0.3
 
 	left := make_sphere(5)
 	left.transform = linalg.matrix4_translate([3]f64{-1.5, 0.33, -0.75}) * linalg.matrix4_scale([3]f64{0.33,0.33,0.33})
 	left.material = DefaultMaterial
-	left.material.color = Color{1,0.8,0.1}
+	left.material.color = Color{0.6352941176470588, 0.5098039215686274, 0.7607843137254902}
 	left.material.diffuse = 0.7
 	left.material.specular = 0.3
 
 
 	world := World{}
-	spheres := [6]Sphere{floor, left_wall, right_wall, middle, right, left}
-	world.spheres = spheres[:]
+
+	objects := [6]Object{floor, left_wall, right_wall, middle, right, left}
+	world.objects = objects[:]
 	world.light = LightPoint{make_pnt3(-10, 10, -10), Color{1, 1, 1}}
 	camera := make_camera(1000, 500, math.PI/3)
 	camera.transform = view_transform(make_pnt3(0, 1.5, -5), make_pnt3(0,1,0), make_vec3(0,1,0))
