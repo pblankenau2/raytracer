@@ -363,7 +363,11 @@ intersect :: proc(ray: Ray, object: Object) -> (Intersection, Intersection, bool
 		// if ray is tangent to sphere then return the same intersection twice
 		return Intersection{t1, o}, Intersection{t2, o}, true
 	case Plane:
-		return Intersection{0.0, o}, Intersection{0.0, o}, false
+		if math.abs(ray.direction.y) < EPSILON {
+			return {}, {}, false
+		}
+		t := -ray.origin.y / ray.direction.y
+		return Intersection{t, o}, Intersection{t, o}, true
 	}
 	return {}, {}, false
 }
@@ -457,11 +461,7 @@ normal_at :: proc(obj: Object, p: [4]f64) -> [4]f64 {
 		world_normal.w = 0.0
 		return linalg.normalize(world_normal)
 	case Plane:
-		object_point := linalg.inverse(o.transform) * p
-		object_normal := object_point - [4]f64{0.0,0.0,0.0,0.0}
-		world_normal := linalg.transpose(linalg.inverse(o.transform)) * object_normal
-		world_normal.w = 0.0
-		return linalg.normalize(world_normal)
+		return make_vec3(0, 1, 0)
 	}
 	return {} // Weird that we need to do this since every case returns.
 }
@@ -487,9 +487,13 @@ view_transform :: proc(from: [4]f64, to: [4]f64, up: [4]f64) -> matrix[4,4]f64 {
 
 main :: proc() {
 
-	floor := make_sphere(0)
-	floor.transform = linalg.matrix4_scale([3]f64{10, 0.01, 10})
-	floor.material = DefaultMaterial
+	// floor := make_sphere(0)
+	// floor.transform = linalg.matrix4_scale([3]f64{10, 0.01, 10})
+	// floor.material = DefaultMaterial
+	// floor.material.color = Color{1, 0.9, 0.9}
+	// floor.material.specular = 0
+
+	floor := Plane{0, matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}, DefaultMaterial}
 	floor.material.color = Color{1, 0.9, 0.9}
 	floor.material.specular = 0
 
@@ -524,7 +528,8 @@ main :: proc() {
 
 	world := World{}
 
-	objects := [6]Object{floor, left_wall, right_wall, middle, right, left}
+	// objects := [6]Object{floor, left_wall, right_wall, middle, right, left}
+	objects := [4]Object{floor, middle, right, left}
 	world.objects = objects[:]
 	world.light = LightPoint{make_pnt3(-10, 10, -10), Color{1, 1, 1}}
 	camera := make_camera(1000, 500, math.PI/3)
