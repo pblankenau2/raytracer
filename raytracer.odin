@@ -179,10 +179,11 @@ Material :: struct {
 	ambient: f64,
 	diffuse: f64,
 	specular: f64,
-	shininess: f64
+	shininess: f64,
+	pattern: Pattern
 }
 
-DefaultMaterial :: Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0}
+DefaultMaterial := Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0, {}}
 
 World :: struct {
 	// TODO. We might want to have struct of arrays here.  Array of spheres, arrays other objects.  Maybe objects should be a tagged union?
@@ -195,7 +196,7 @@ World :: struct {
 DefaultWorld := World{
 	LightPoint{make_pnt3(-10,10,-10),Color{1,1,1}},
 	{
-		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200}),
+		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200, pattern={}}),
 		make_sphere(1, transform=linalg.matrix4_scale([3]f64{0.5,0.5,0.5}))
 	}
 }
@@ -265,9 +266,9 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	shadowed := is_shadowed(world, comps.point + comps.normalv * EPSILON)
 	switch o in comps.object {
 	case Sphere:
-		return lighting(o.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		return lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
 	case Plane:
-		return lighting(o.material, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		return lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
 	}
 	return {}
 }
@@ -314,8 +315,30 @@ is_shadowed :: proc(world: World, point: [4]f64) -> bool {
 	}
 }
 
-lighting :: proc(material: Material, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64, in_shadow: bool) -> Color {
+Stripe :: struct {
+	color1: Color,
+	color2: Color,
+	transform: matrix[4,4]f64
+}
+
+Pattern :: union {
+	Stripe
+}
+
+lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64, in_shadow: bool) -> Color {
 	effective_color := material.color * light.intensity
+	object_point := linalg.inverse(object_transform) * point
+	switch pattern in material.pattern {
+		case Stripe:
+			pattern_point := linalg.inverse(pattern.transform) * object_point
+			if (int(math.floor(pattern_point.x)) %% 2) == 1 {
+				effective_color = pattern.color1 * light.intensity
+			} else {
+				effective_color = pattern.color2 * light.intensity
+			}
+	}
+
+
 	lightv := linalg.normalize(light.position - point)
 	ambient := effective_color * material.ambient
 	if in_shadow {
@@ -485,6 +508,7 @@ view_transform :: proc(from: [4]f64, to: [4]f64, up: [4]f64) -> matrix[4,4]f64 {
 	return orientation * linalg.matrix4_translate([3]f64{-from.x, -from.y, -from.z})
 }
 
+
 main :: proc() {
 
 	// floor := make_sphere(0)
@@ -510,6 +534,11 @@ main :: proc() {
 	middle.material.color = Color{0.1, 1, 0.5}
 	middle.material.diffuse = 0.7
 	middle.material.specular = 0.3
+	middle.material.pattern = Stripe{
+		Color{0.1, 1, 0.5},
+		Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764},
+		linalg.matrix4_scale([3]f64{0.25,0.25,0.25}) * matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}
+	}
 
 	right := make_sphere(4)
 	right.transform = linalg.matrix4_translate([3]f64{1.5, 0.5, -0.5}) * linalg.matrix4_scale([3]f64{0.5,0.5,0.5})
