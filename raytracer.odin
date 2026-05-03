@@ -321,8 +321,15 @@ Stripe :: struct {
 	transform: matrix[4,4]f64
 }
 
+Gradient :: struct {
+	color1: Color,
+	color2: Color,
+	transform: matrix[4,4]f64
+}
+
 Pattern :: union {
-	Stripe
+	Stripe,
+	Gradient
 }
 
 lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64, in_shadow: bool) -> Color {
@@ -336,6 +343,12 @@ lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: Li
 			} else {
 				effective_color = pattern.color2 * light.intensity
 			}
+		case Gradient:
+			pattern_point := linalg.inverse(pattern.transform) * object_point
+
+			distance := pattern.color2 - pattern.color1
+			fraction := pattern_point.x - math.floor(pattern_point.x)
+			effective_color = (pattern.color1 + distance * fraction) * light.intensity
 	}
 
 
@@ -534,10 +547,11 @@ main :: proc() {
 	middle.material.color = Color{0.1, 1, 0.5}
 	middle.material.diffuse = 0.7
 	middle.material.specular = 0.3
-	middle.material.pattern = Stripe{
-		Color{0.1, 1, 0.5},
+	middle.material.pattern = Gradient{
 		Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764},
-		linalg.matrix4_scale([3]f64{0.25,0.25,0.25}) * matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}
+		Color{0.1, 1, 0.5},
+		// linalg.matrix4_scale([3]f64{0.25,0.25,0.25}) * matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}
+		matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1} * linalg.matrix4_translate([3]f64{-1.0, 0, 0}) * linalg.matrix4_scale([3]f64{2.0,2.0,2.0})
 	}
 
 	right := make_sphere(4)
