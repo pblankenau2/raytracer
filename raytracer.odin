@@ -327,9 +327,16 @@ Gradient :: struct {
 	transform: matrix[4,4]f64
 }
 
+Checker :: struct {
+	color1: Color,
+	color2: Color,
+	transform: matrix[4,4]f64
+}
+
 Pattern :: union {
 	Stripe,
-	Gradient
+	Gradient,
+	Checker,
 }
 
 lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: LightPoint, point: [4]f64, eyev: [4]f64, normalv: [4]f64, in_shadow: bool) -> Color {
@@ -339,6 +346,13 @@ lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: Li
 		case Stripe:
 			pattern_point := linalg.inverse(pattern.transform) * object_point
 			if (int(math.floor(pattern_point.x)) %% 2) == 1 {
+				effective_color = pattern.color1 * light.intensity
+			} else {
+				effective_color = pattern.color2 * light.intensity
+			}
+		case Checker:
+			pattern_point := linalg.inverse(pattern.transform) * object_point
+			if (int(math.floor(pattern_point.x) + math.floor(pattern_point.y) + math.floor(pattern_point.z)) %% 2) == 1 {
 				effective_color = pattern.color1 * light.intensity
 			} else {
 				effective_color = pattern.color2 * light.intensity
@@ -530,9 +544,14 @@ main :: proc() {
 	// floor.material.color = Color{1, 0.9, 0.9}
 	// floor.material.specular = 0
 
-	floor := Plane{0, matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}, DefaultMaterial}
+	floor := Plane{0, linalg.identity_matrix(matrix[4,4]f64), DefaultMaterial}
 	floor.material.color = Color{1, 0.9, 0.9}
 	floor.material.specular = 0
+	floor.material.pattern = Checker{
+		Color{0.1, 0.1, 0.1},
+		Color{0.99, 0.99, 0.99},
+		linalg.identity_matrix(matrix[4,4]f64) * linalg.matrix4_translate([3]f64{0,-EPSILON,0}) // * linalg.matrix4_translate([3]f64{-1.0, 0, 0}) * linalg.matrix4_scale([3]f64{2.0,2.0,2.0})
+	}
 
 	left_wall := make_sphere(1)
 	left_wall.transform = linalg.matrix4_translate([3]f64{0,0,5}) * linalg.matrix4_rotate(-math.PI/4, [3]f64{0,1,0}) * linalg.matrix4_rotate(math.PI/2, [3]f64{1,0,0}) * linalg.matrix4_scale([3]f64{10, 0.01, 10})
@@ -548,10 +567,10 @@ main :: proc() {
 	middle.material.diffuse = 0.7
 	middle.material.specular = 0.3
 	middle.material.pattern = Gradient{
-		Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764},
+		Color{0.9, 0.1, 0.1},
 		Color{0.1, 1, 0.5},
 		// linalg.matrix4_scale([3]f64{0.25,0.25,0.25}) * matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}
-		matrix[4,4]f64{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1} * linalg.matrix4_translate([3]f64{-1.0, 0, 0}) * linalg.matrix4_scale([3]f64{2.0,2.0,2.0})
+		linalg.identity_matrix(matrix[4,4]f64) * linalg.matrix4_translate([3]f64{-1.0, 0, 0}) * linalg.matrix4_scale([3]f64{2.0,2.0,2.0})
 	}
 
 	right := make_sphere(4)
