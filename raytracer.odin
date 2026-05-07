@@ -592,10 +592,11 @@ main :: proc() {
 	right := make_sphere(4)
 	right.transform = linalg.matrix4_translate([3]f64{1.5, 0.5, -0.5}) * linalg.matrix4_scale([3]f64{0.5,0.5,0.5})
 	right.material = DefaultMaterial
-	right.material.color = Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764}
-	right.material.diffuse = 0.7
-	right.material.specular = 0.3
-	right.material.reflective = 1.0
+	right.material.color = Color{0.8, 0.8, 0.8}
+	right.material.diffuse = 0.3
+	right.material.specular = 0.7
+	right.material.shininess = 300
+	right.material.reflective = 0.95
 
 	left := make_sphere(5)
 	left.transform = linalg.matrix4_translate([3]f64{-1.5, 0.33, -0.75}) * linalg.matrix4_scale([3]f64{0.33,0.33,0.33})
