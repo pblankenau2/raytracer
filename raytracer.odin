@@ -180,10 +180,11 @@ Material :: struct {
 	diffuse: f64,
 	specular: f64,
 	shininess: f64,
+	reflective: f64,
 	pattern: Pattern
 }
 
-DefaultMaterial := Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0, {}}
+DefaultMaterial := Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0, 0.0, {}}
 
 World :: struct {
 	// TODO. We might want to have struct of arrays here.  Array of spheres, arrays other objects.  Maybe objects should be a tagged union?
@@ -196,7 +197,7 @@ World :: struct {
 DefaultWorld := World{
 	LightPoint{make_pnt3(-10,10,-10),Color{1,1,1}},
 	{
-		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200, pattern={}}),
+		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200, reflective=0.0, pattern={}}),
 		make_sphere(1, transform=linalg.matrix4_scale([3]f64{0.5,0.5,0.5}))
 	}
 }
@@ -236,13 +237,15 @@ PreComputations :: struct {
 	point: [4]f64,
 	eyev: [4]f64,
 	normalv: [4]f64,
-	inside: bool
+	inside: bool,
+	reflectv: [4]f64
 }
 
 prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputations {
 	point := position(ray, intersection.t)
 	normalv := normal_at(intersection.object, point)
 	eyev := -ray.direction
+	reflectv := reflect(ray.direction, normalv)
 
 	inside := false
 	if linalg.dot(normalv, eyev) < 0 {
@@ -256,21 +259,33 @@ prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputa
 		point=point,
 		eyev=eyev,
 		normalv=normalv,
-		inside=inside
+		inside=inside,
+		reflectv=reflectv,
 	}
 }
 
 shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	// TODO: put the over point in comps?  comps.over_point ← comps.point + comps.normalv * EPSILON
-
-	shadowed := is_shadowed(world, comps.point + comps.normalv * EPSILON)
+	over_point := comps.point + comps.normalv * EPSILON
+	shadowed := is_shadowed(world, over_point)
+	surface : Color
+	reflective := 0.0
 	switch o in comps.object {
 	case Sphere:
-		return lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		surface = lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		reflective = o.material.reflective
 	case Plane:
-		return lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		surface = lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
+		reflective = o.material.reflective
 	}
-	return {}
+
+	reflect_ray := Ray{over_point, comps.reflectv}
+	color := color_at(world, reflect_ray)
+	reflected := color * reflective
+	if reflective == 0.0 {
+		reflected = Color{0,0,0}
+	}
+	return surface + reflected
 }
 
 color_at :: proc(w: World, r: Ray) -> Color {
@@ -552,6 +567,7 @@ main :: proc() {
 		Color{0.99, 0.99, 0.99},
 		linalg.identity_matrix(matrix[4,4]f64) * linalg.matrix4_translate([3]f64{0,-EPSILON,0}) // * linalg.matrix4_translate([3]f64{-1.0, 0, 0}) * linalg.matrix4_scale([3]f64{2.0,2.0,2.0})
 	}
+	floor.material.reflective = 0.5
 
 	left_wall := make_sphere(1)
 	left_wall.transform = linalg.matrix4_translate([3]f64{0,0,5}) * linalg.matrix4_rotate(-math.PI/4, [3]f64{0,1,0}) * linalg.matrix4_rotate(math.PI/2, [3]f64{1,0,0}) * linalg.matrix4_scale([3]f64{10, 0.01, 10})
@@ -579,6 +595,7 @@ main :: proc() {
 	right.material.color = Color{0.9294117647058824, 0.8705882352941177, 0.047058823529411764}
 	right.material.diffuse = 0.7
 	right.material.specular = 0.3
+	right.material.reflective = 1.0
 
 	left := make_sphere(5)
 	left.transform = linalg.matrix4_translate([3]f64{-1.5, 0.33, -0.75}) * linalg.matrix4_scale([3]f64{0.33,0.33,0.33})
