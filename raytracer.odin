@@ -155,7 +155,7 @@ render :: proc(camera: Camera, world: World) -> Canvas {
 				virtual.arena_free_all(&arena) // Free memory for next pixel
 				
 				ray := ray_for_pixel(camera, x, y)
-				color := color_at(world, ray)
+				color := color_at(world, ray, 5)
 				set_color(canv, y, x, color)
 			}
 		}
@@ -264,7 +264,7 @@ prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputa
 	}
 }
 
-shade_hit :: proc(world: World, comps: PreComputations) -> Color {
+shade_hit :: proc(world: World, comps: PreComputations, remaining: int) -> Color {
 	// TODO: put the over point in comps?  comps.over_point ← comps.point + comps.normalv * EPSILON
 	over_point := comps.point + comps.normalv * EPSILON
 	shadowed := is_shadowed(world, over_point)
@@ -280,7 +280,10 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	}
 
 	reflect_ray := Ray{over_point, comps.reflectv}
-	color := color_at(world, reflect_ray)
+	if remaining <= 0 {
+		return surface
+	}
+	color := color_at(world, reflect_ray, remaining-1)
 	reflected := color * reflective
 	if reflective == 0.0 {
 		reflected = Color{0,0,0}
@@ -288,21 +291,21 @@ shade_hit :: proc(world: World, comps: PreComputations) -> Color {
 	return surface + reflected
 }
 
-color_at :: proc(w: World, r: Ray) -> Color {
+color_at :: proc(w: World, r: Ray, remaining: int) -> Color {
 	intersections := intersect_world(w, r)
 	hit_intersection, ok := hit(intersections[:])
 	if !ok {
 		return Color{0,0,0}
 	}
 	comps := prepare_computations(hit_intersection, r)
-	return shade_hit(w, comps)
+	return shade_hit(w, comps, remaining)
 }
 
 @(test)
 test_shade_hit :: proc(t: ^testing.T) {
 	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
 	i := Intersection{4, DefaultWorld.objects[0]}
-	c := shade_hit(DefaultWorld, prepare_computations(i, r))
+	c := shade_hit(DefaultWorld, prepare_computations(i, r), 5)
 	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(EPSILON))
 
 
@@ -311,7 +314,7 @@ test_shade_hit :: proc(t: ^testing.T) {
 	r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
 	i = Intersection{0.5, w.objects[1]}
 
-	c = shade_hit(w, prepare_computations(i, r))
+	c = shade_hit(w, prepare_computations(i, r), 5)
 	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(EPSILON))
 }
 
