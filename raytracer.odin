@@ -45,33 +45,34 @@ Ray :: struct {
 	direction: [4]f64 // Vec
 }
 
-// TODO: consider a SOA instead.
-Sphere :: struct {
+// TODO: Consider making Object struct with a variant union to switch on and contain specialized data
+// TODO: Consider just making Object a struct and then defining type aliases (Plane :: Object).  If you need specialized data
+// you can later leverage subtyping with the using keyword.  But will switch statements break?
+Object :: struct {
 	obj_id: i32,
 	transform: matrix[4,4]f64,
-	material: Material
+	material: Material,
+	variant: ObjectVariant
 }
+
+ObjectVariant :: union {
+	Sphere,
+	Plane
+}
+// TODO: consider a SOA instead.
+Sphere :: struct {}
 
 // TODO: consider pre-computing the inverse transform and transpose - need to make sure spheres are only created with this function then.
-Plane :: struct {
-	obj_id: i32,
-	transform: matrix[4,4]f64,
-	material: Material
-}
-
-Object :: union {
-	Sphere,
-	Plane,
-}
+Plane :: struct {}
 
 make_sphere :: proc(
 	obj_id: i32,
 	transform: matrix[4,4]f64 = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1},
 	material : Material = DefaultMaterial
-) -> Sphere {
+) -> Object {
 	// TODO: inv := linalg.inverse(transform)
     // TODO: inv_tr := linalg.transpose(inv)
-	return Sphere{obj_id=obj_id, transform=transform, material=material}
+	return Object{obj_id=obj_id, transform=transform, material=material, variant=Sphere{}}
 }
 
 // NOTE: the canvas is always 1 world unit from the camera.
@@ -155,7 +156,7 @@ render :: proc(camera: Camera, world: World) -> Canvas {
 				virtual.arena_free_all(&arena) // Free memory for next pixel
 				
 				ray := ray_for_pixel(camera, x, y)
-				color := color_at(world, ray, 5)
+				color := color_at(world, ray)
 				set_color(canv, y, x, color)
 			}
 		}
@@ -181,10 +182,12 @@ Material :: struct {
 	specular: f64,
 	shininess: f64,
 	reflective: f64,
+	transparency: f64,
+	refractive_index: f64,
 	pattern: Pattern
 }
 
-DefaultMaterial := Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0, 0.0, {}}
+DefaultMaterial := Material{Color{1,1,1}, 0.1, 0.9, 0.9, 200.0, 0.0, 0.0, 1.0, {}}
 
 World :: struct {
 	// TODO. We might want to have struct of arrays here.  Array of spheres, arrays other objects.  Maybe objects should be a tagged union?
@@ -197,7 +200,20 @@ World :: struct {
 DefaultWorld := World{
 	LightPoint{make_pnt3(-10,10,-10),Color{1,1,1}},
 	{
-		make_sphere(0, material=Material{color=Color{0.8,1.0,0.6}, ambient=0.1, diffuse=0.7, specular=0.2, shininess=200, reflective=0.0, pattern={}}),
+		make_sphere(
+			0, 
+			material=Material{
+				color=Color{0.8,1.0,0.6},
+				ambient=0.1,
+				diffuse=0.7,
+				specular=0.2,
+				shininess=200,
+				reflective=0.0,
+				transparency=0.0,
+				refractive_index=1.0,
+				pattern={}
+			}
+		),
 		make_sphere(1, transform=linalg.matrix4_scale([3]f64{0.5,0.5,0.5}))
 	}
 }
@@ -238,10 +254,13 @@ PreComputations :: struct {
 	eyev: [4]f64,
 	normalv: [4]f64,
 	inside: bool,
-	reflectv: [4]f64
+	reflectv: [4]f64,
+	n1: f64, // refractive_index_exiting
+	n2: f64, // refractive_index_entering
+	under_point: [4]f64,
 }
 
-prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputations {
+prepare_computations :: proc(intersection: Intersection, ray: Ray, xs: []Intersection) -> PreComputations {
 	point := position(ray, intersection.t)
 	normalv := normal_at(intersection.object, point)
 	eyev := -ray.direction
@@ -253,6 +272,36 @@ prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputa
 		normalv = -normalv
 	}
 
+	containers : [dynamic]Intersection
+	hit_x, ok := hit(xs)
+	n1 := 1.0
+	n2 := 1.0
+	for x in xs {
+		if x == hit_x {
+			if (len(containers) == 0) {
+				n1 = 1.0
+			} else {
+				n1 = containers[len(containers) - 1].object.material.refractive_index
+			}
+		}
+
+		index, found := slice.linear_search(containers[:], x)
+		if found {
+			// containers[index] = Intersection{}
+			ordered_remove(&containers, index)
+		} else {
+			append(&containers, x)
+		}
+		if x == hit_x {
+			if len(containers) == 0 {
+				n2 = 1.0
+			} else {
+				n2 = containers[len(containers) - 1].object.material.refractive_index
+			}
+		}
+
+	}
+
 	return PreComputations{
 		t=intersection.t,
 		object=intersection.object,
@@ -261,6 +310,9 @@ prepare_computations :: proc(intersection: Intersection, ray: Ray) -> PreComputa
 		normalv=normalv,
 		inside=inside,
 		reflectv=reflectv,
+		n1=n1,
+		n2=n2,
+		under_point=point - normalv * EPSILON
 	}
 }
 
@@ -268,36 +320,27 @@ shade_hit :: proc(world: World, comps: PreComputations, remaining: int) -> Color
 	// TODO: put the over point in comps?  comps.over_point ← comps.point + comps.normalv * EPSILON
 	over_point := comps.point + comps.normalv * EPSILON
 	shadowed := is_shadowed(world, over_point)
-	surface : Color
-	reflective := 0.0
-	switch o in comps.object {
-	case Sphere:
-		surface = lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
-		reflective = o.material.reflective
-	case Plane:
-		surface = lighting(o.material, o.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
-		reflective = o.material.reflective
-	}
+	surface := lighting(comps.object.material, comps.object.transform, world.light, comps.point, comps.eyev, comps.normalv, shadowed)
 
 	reflect_ray := Ray{over_point, comps.reflectv}
 	if remaining <= 0 {
 		return surface
 	}
 	color := color_at(world, reflect_ray, remaining-1)
-	reflected := color * reflective
-	if reflective == 0.0 {
-		reflected = Color{0,0,0}
-	}
+	reflected := color * comps.object.material.reflective
+
+	// TODO: call refracted color here.
+
 	return surface + reflected
 }
 
-color_at :: proc(w: World, r: Ray, remaining: int) -> Color {
+color_at :: proc(w: World, r: Ray, remaining: int = 5) -> Color {
 	intersections := intersect_world(w, r)
 	hit_intersection, ok := hit(intersections[:])
 	if !ok {
 		return Color{0,0,0}
 	}
-	comps := prepare_computations(hit_intersection, r)
+	comps := prepare_computations(hit_intersection, r, intersections[:])
 	return shade_hit(w, comps, remaining)
 }
 
@@ -305,7 +348,7 @@ color_at :: proc(w: World, r: Ray, remaining: int) -> Color {
 test_shade_hit :: proc(t: ^testing.T) {
 	r := Ray{make_pnt3(0,0,-5), make_vec3(0,0,1)}
 	i := Intersection{4, DefaultWorld.objects[0]}
-	c := shade_hit(DefaultWorld, prepare_computations(i, r), 5)
+	c := shade_hit(DefaultWorld, prepare_computations(i, r, []Intersection{i}), 5)
 	testing.expect(t, linalg.vector_length(c - Color{0.38066, 0.47583, 0.2855}) < f64(EPSILON))
 
 
@@ -314,7 +357,7 @@ test_shade_hit :: proc(t: ^testing.T) {
 	r = Ray{make_pnt3(0, 0, 0), make_vec3(0, 0, 1)}
 	i = Intersection{0.5, w.objects[1]}
 
-	c = shade_hit(w, prepare_computations(i, r), 5)
+	c = shade_hit(w, prepare_computations(i, r, []Intersection{i}), 5)
 	testing.expect(t, linalg.vector_length(c - Color{0.90498, 0.90498, 0.90498}) < f64(EPSILON))
 }
 
@@ -413,29 +456,29 @@ lighting :: proc(material: Material, object_transform: matrix[4,4]f64, light: Li
 
 // TODO: return [2]f64 slice?
 intersect :: proc(ray: Ray, object: Object) -> (Intersection, Intersection, bool) {
-	switch o in object {
+	switch o in object.variant {
 	case Sphere:
 		// Need to transform the ray before calculating the intersection.
-		new_ray := transform(ray, linalg.inverse(o.transform))
+		new_ray := transform(ray, linalg.inverse(object.transform))
 		sphere_to_ray := new_ray.origin - make_pnt3(0.0,0.0,0.0)
 		a := linalg.dot(new_ray.direction, new_ray.direction)
 		b := 2 * linalg.dot(new_ray.direction, sphere_to_ray)
 		c := linalg.dot(sphere_to_ray, sphere_to_ray) - 1
 
 		discriminant := math.pow(b,2) - 4*a*c
-		if (discriminant < 0.0) {return Intersection{0.0, o}, Intersection{0.0, o}, false} // TODO: return nil bad?
+		if (discriminant < 0.0) {return Intersection{0.0, object}, Intersection{0.0, object}, false} // TODO: return nil bad?
 
 		t1 := (-b - math.sqrt(discriminant)) / (2 * a)
 		t2 := (-b + math.sqrt(discriminant)) / (2 * a)
 
 		// if ray is tangent to sphere then return the same intersection twice
-		return Intersection{t1, o}, Intersection{t2, o}, true
+		return Intersection{t1, object}, Intersection{t2, object}, true
 	case Plane:
 		if math.abs(ray.direction.y) < EPSILON {
 			return {}, {}, false
 		}
 		t := -ray.origin.y / ray.direction.y
-		return Intersection{t, o}, Intersection{t, o}, true
+		return Intersection{t, object}, Intersection{t, object}, true
 	}
 	return {}, {}, false
 }
@@ -453,7 +496,7 @@ hit :: proc(intersections: []Intersection) -> (Intersection, bool) {
 			hit_record = i
 			found = true
 		}
-	}	
+	}
 	return hit_record, found
 }
 
@@ -521,11 +564,11 @@ transform :: proc(r: Ray, m: matrix[4,4]f64) -> Ray {
 
 normal_at :: proc(obj: Object, p: [4]f64) -> [4]f64 {
 
-	switch o in obj {
+	switch o in obj.variant {
 	case Sphere:
-		object_point := linalg.inverse(o.transform) * p
+		object_point := linalg.inverse(obj.transform) * p
 		object_normal := object_point - [4]f64{0.0,0.0,0.0,0.0}
-		world_normal := linalg.transpose(linalg.inverse(o.transform)) * object_normal
+		world_normal := linalg.transpose(linalg.inverse(obj.transform)) * object_normal
 		world_normal.w = 0.0
 		return linalg.normalize(world_normal)
 	case Plane:
@@ -562,7 +605,7 @@ main :: proc() {
 	// floor.material.color = Color{1, 0.9, 0.9}
 	// floor.material.specular = 0
 
-	floor := Plane{0, linalg.identity_matrix(matrix[4,4]f64), DefaultMaterial}
+	floor := Object{0, linalg.identity_matrix(matrix[4,4]f64), DefaultMaterial, Plane{}}
 	floor.material.color = Color{1, 0.9, 0.9}
 	floor.material.specular = 0
 	floor.material.pattern = Checker{
